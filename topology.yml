@@ -1,0 +1,41 @@
+# Адреса и маршруты четырёх ВМ. Порядок линков определяет их MAC.
+inetRouter:
+  router: true
+  links:
+    inet-central:
+      addresses: [192.168.255.1/30]
+      routes:
+        192.168.0.0/28: 192.168.255.2
+        192.168.255.12/30: 192.168.255.2
+
+centralRouter:
+  router: true
+  links:
+    inet-central:
+      addresses: [192.168.255.2/30]
+      routes:
+        0.0.0.0/0: 192.168.255.1
+    directors:
+      addresses: [192.168.0.1/28]
+    central-inet2:
+      addresses: [192.168.255.13/30]
+
+inetRouter2:
+  router: true
+  links:
+    central-inet2:
+      addresses: [192.168.255.14/30]
+      routes:
+        0.0.0.0/0: 192.168.255.13
+    host-web:
+      host_only: true
+      addresses: [192.168.56.10/24]
+
+centralServer:
+  links:
+    directors:
+      addresses: [192.168.0.2/28]
+      routes:
+        0.0.0.0/0: 192.168.0.1
+
+# Версия 1 | 2026-11-08 | Транзит к inetRouter2 и host-only для HTTP.

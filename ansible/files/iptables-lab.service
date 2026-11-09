@@ -1,0 +1,15 @@
+# Восстанавливает правила IPv4 выделенной ВМ при загрузке.
+[Unit]
+Description=Restore iptables rules for OTUS lab
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/iptables-restore /etc/iptables-lab.rules
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+
+# Версия 1 | 2026-11-08 | Автозагрузка правил iptables.

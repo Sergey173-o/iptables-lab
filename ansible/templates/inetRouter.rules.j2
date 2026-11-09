@@ -1,0 +1,40 @@
+# IPv4-фильтр и NAT интернет-шлюза. SSH на служебном NAT остаётся доступен.
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+:LAB_KNOCK - [0:0]
+:LAB_START - [0:0]
+:LAB_MIDDLE - [0:0]
+:LAB_OPEN - [0:0]
+-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A INPUT -d 192.168.255.1/32 -p tcp --syn -m multiport --dports 7001,7002,7003 -j LAB_KNOCK
+-A INPUT -d 192.168.255.1/32 -p tcp --dport 22 -m recent --name LAB_SSH --rcheck --seconds 30 -j ACCEPT
+-A INPUT -d 192.168.255.1/32 -p tcp --dport 22 -j REJECT --reject-with tcp-reset
+-A LAB_KNOCK -p tcp --dport 7001 -j LAB_START
+-A LAB_KNOCK -p tcp --dport 7002 -m recent --name LAB_STEP1 --rcheck --seconds 10 -j LAB_MIDDLE
+-A LAB_KNOCK -p tcp --dport 7003 -m recent --name LAB_STEP2 --rcheck --seconds 10 -j LAB_OPEN
+-A LAB_KNOCK -m recent --name LAB_STEP1 --remove
+-A LAB_KNOCK -m recent --name LAB_STEP2 --remove
+-A LAB_KNOCK -p tcp -j REJECT --reject-with tcp-reset
+-A LAB_START -m recent --name LAB_STEP2 --remove
+-A LAB_START -p tcp -m recent --name LAB_STEP1 --set -j REJECT --reject-with tcp-reset
+-A LAB_MIDDLE -m recent --name LAB_STEP1 --remove
+-A LAB_MIDDLE -p tcp -m recent --name LAB_STEP2 --set -j REJECT --reject-with tcp-reset
+-A LAB_OPEN -m recent --name LAB_STEP2 --remove
+-A LAB_OPEN -p tcp -m recent --name LAB_SSH --set -j REJECT --reject-with tcp-reset
+-A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A FORWARD -o {{ ansible_facts.default_ipv4.interface }} -s 192.168.0.0/28 -j ACCEPT
+-A FORWARD -o {{ ansible_facts.default_ipv4.interface }} -s 192.168.255.0/30 -j ACCEPT
+-A FORWARD -o {{ ansible_facts.default_ipv4.interface }} -s 192.168.255.12/30 -j ACCEPT
+COMMIT
+*nat
+:PREROUTING ACCEPT [0:0]
+:INPUT ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]
+:POSTROUTING ACCEPT [0:0]
+-A POSTROUTING -o {{ ansible_facts.default_ipv4.interface }} -s 192.168.0.0/28 -j MASQUERADE
+-A POSTROUTING -o {{ ansible_facts.default_ipv4.interface }} -s 192.168.255.0/30 -j MASQUERADE
+-A POSTROUTING -o {{ ansible_facts.default_ipv4.interface }} -s 192.168.255.12/30 -j MASQUERADE
+COMMIT
+# Версия 2 | 2026-11-08 | Явный TCP в правилах REJECT с tcp-reset.

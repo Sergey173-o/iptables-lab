@@ -1,0 +1,179 @@
+---
+# Применяет постоянную сетевую конфигурацию одной ВМ через SSH Vagrant.
+- name: Настроить сетевую лабораторию
+  hosts: all
+  become: true
+  tasks:
+    - name: Настроить DNSSEC на внутренних ВМ
+      when: not (lab_edge | bool)
+      block:
+        - name: Создать каталог конфигурации резолвера
+          ansible.builtin.file:
+            path: /etc/systemd/resolved.conf.d
+            state: directory
+            mode: '0755'
+
+        - name: Сохранить настройку DNSSEC для лаборатории
+          ansible.builtin.copy:
+            dest: /etc/systemd/resolved.conf.d/99-z-network-lab-client-dnssec.conf
+            mode: '0644'
+            content: |
+              [Resolve]
+              DNSSEC=no
+          register: lab_client_dnssec
+
+        - name: Применить настройки резолвера
+          ansible.builtin.systemd:
+            name: systemd-resolved
+            state: restarted
+          when: lab_client_dnssec.changed
+
+    - name: Проверить сетевой сервис Ubuntu
+      ansible.builtin.command: systemctl is-active systemd-networkd
+      changed_when: false
+
+    - name: Включить IPv4 forwarding на роутерах
+      when: lab_router | bool
+      block:
+        - name: Сохранить настройку ядра
+          ansible.builtin.copy:
+            dest: /etc/sysctl.d/90-network-lab.conf
+            content: "net.ipv4.ip_forward = 1\n"
+            mode: '0644'
+
+        - name: Применить настройку ядра
+          ansible.builtin.command: sysctl -p /etc/sysctl.d/90-network-lab.conf
+          changed_when: false
+
+    - name: Настроить адреса и маршруты на внутренних интерфейсах
+      ansible.builtin.template:
+        src: internal.network.j2
+        dest: "/etc/systemd/network/05-lab-{{ item.segment }}.network"
+        mode: '0644'
+      loop: "{{ lab_links }}"
+      loop_control:
+        label: "{{ item.segment }}"
+
+    - name: Оставить DHCP на NAT, отключив маршруты и DNS от него
+      ansible.builtin.copy:
+        dest: /etc/systemd/network/05-lab-management.network
+        mode: '0644'
+        content: |
+          [Match]
+          MACAddress={{ lab_nat_mac }}
+
+          [Network]
+          DHCP=ipv4
+          IPv6AcceptRA=no
+
+          [DHCPv4]
+          UseRoutes=no
+          UseGateway=no
+          UseDNS=no
+      when: not (lab_edge | bool)
+
+    - name: Настроить выход в интернет на inetRouter
+      when: lab_edge | bool
+      block:
+        - name: Создать каталог настроек DNS
+          ansible.builtin.file:
+            path: /etc/systemd/resolved.conf.d
+            state: directory
+            mode: '0755'
+
+        - name: Настроить DNS VirtualBox на inetRouter
+          ansible.builtin.copy:
+            dest: /etc/systemd/resolved.conf.d/99-network-lab-dns.conf
+            mode: '0644'
+            content: |
+              [Resolve]
+              DNS=10.0.2.3
+              Domains=~.
+              DNSSEC=no
+          register: lab_edge_dns
+
+        - name: Применить настройки DNS
+          ansible.builtin.systemd:
+            name: systemd-resolved
+            state: restarted
+          when: lab_edge_dns.changed
+
+    - name: Перечитать конфигурацию интерфейсов
+      ansible.builtin.command: networkctl reload
+      changed_when: false
+
+    - name: Дождаться маршрута через лабораторию
+      ansible.builtin.command: ip -4 route get 1.1.1.1
+      register: lab_default_route
+      until: lab_default_route.rc == 0 and ('via ' ~ lab_gateway ~ ' ') in lab_default_route.stdout
+      retries: 15
+      delay: 2
+      changed_when: false
+      vars:
+        lab_gateway: "{{ lab_links[0].routes['0.0.0.0/0'] }}"
+      when: not (lab_edge | bool)
+
+    - name: Настроить iptables на пограничных роутерах
+      when: lab_machine in ['inetRouter', 'inetRouter2']
+      block:
+        - name: Установить iptables
+          ansible.builtin.apt:
+            name: iptables
+            state: present
+            update_cache: true
+            cache_valid_time: 3600
+
+        - name: Сохранить и проверить правила IPv4
+          ansible.builtin.template:
+            src: "{{ lab_machine }}.rules.j2"
+            dest: /etc/iptables-lab.rules
+            mode: '0600'
+            validate: /usr/sbin/iptables-restore --test %s
+
+        - name: Установить службу восстановления правил
+          ansible.builtin.copy:
+            src: iptables-lab.service
+            dest: /etc/systemd/system/iptables-lab.service
+            mode: '0644'
+
+        - name: Применить правила и включить их загрузку при старте
+          ansible.builtin.systemd:
+            name: iptables-lab.service
+            daemon_reload: true
+            enabled: true
+            state: restarted
+
+    - name: Установить knock-скрипт на centralRouter
+      ansible.builtin.copy:
+        src: knock-ssh_v1.sh
+        dest: /usr/local/bin/knock-ssh
+        mode: '0755'
+      when: lab_machine == 'centralRouter'
+
+    - name: Настроить Nginx на центральном сервере
+      when: lab_machine == 'centralServer'
+      block:
+        - name: Установить Nginx
+          ansible.builtin.apt:
+            name: nginx
+            state: present
+            update_cache: true
+            cache_valid_time: 3600
+
+        - name: Сохранить страницу для проверки проброса
+          ansible.builtin.copy:
+            dest: /var/www/html/index.html
+            mode: '0644'
+            content: |
+              <!doctype html>
+              <meta charset="utf-8">
+              <title>OTUS iptables lab</title>
+              <h1>centralServer: nginx OK</h1>
+
+        - name: Запустить Nginx и включить автозапуск
+          ansible.builtin.systemd:
+            name: nginx
+            enabled: true
+            state: started
+
+# Версия 1 | 2026-11-08 | Пакеты, port knocking, DNAT и Nginx.
